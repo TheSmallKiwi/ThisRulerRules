@@ -7,6 +7,14 @@ numbered list of every measurement.
 Built with **WPF on .NET 10** — no NuGet packages, screen capture is done with
 plain Win32 GDI, so it runs with nothing to download.
 
+![This Ruler Rules in use: numbered measurement lines drawn over a scientific plant image, with the magnifier loupe, live snapping readout, and the results panel](RulerScreenshot.png)
+
+*Measuring leaf features on a calibrated image. Line **#1** was drawn across the
+2.5 cm scale bar to set the scale (1 px = 0.0158 cm), so every later line reads
+straight out in centimetres. The **loupe** magnifies the cursor 6.8× for
+pixel-exact endpoints, line **#9** is snapping horizontally (`711 px = 11.25 cm ─ H`),
+and the panel sits at 50% opacity while measuring.*
+
 ## Download
 
 Grab `Ruler.exe` from the [latest release](https://github.com/TheSmallKiwi/ThisRulerRules/releases/latest).
