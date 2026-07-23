@@ -7,6 +7,12 @@ numbered list of every measurement.
 Built with **WPF on .NET 10** — no NuGet packages, screen capture is done with
 plain Win32 GDI, so it runs with nothing to download.
 
+## Download
+
+Grab `Ruler.exe` from the [latest release](https://github.com/TheSmallKiwi/ThisRulerRules/releases/latest).
+It needs the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)
+(x64) — that's why it's a ~0.3 MB single file rather than a bundled ~150 MB one.
+
 ## Run it
 
 ```bash
@@ -111,3 +117,7 @@ crosshair on the exact pixel. Scale is stored as *units per pixel*
 | `SelfTest.cs` | `Ruler.exe --selftest <dir>` renders the UI to PNGs (dev check) |
 | `app.manifest` | Per-monitor-v2 DPI awareness |
 | `icon.ico` | App icon — two intersecting ruler lines (16–256 px) |
+
+## License
+
+[MIT](LICENSE)
