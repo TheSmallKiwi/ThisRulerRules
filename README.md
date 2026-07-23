@@ -1,4 +1,4 @@
-# Ruler — *This Ruler Rules*
+# *This Ruler Rules*
 
 A lightweight on-screen ruler for Windows. Draw lines anywhere on your screen,
 measure them in **screen pixels**, calibrate to real-world units, and keep a
