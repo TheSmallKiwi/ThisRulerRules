@@ -65,13 +65,19 @@ Then run `bin\Release\net10.0-windows\Ruler.exe`.
 | `R` | Refresh the magnifier snapshot |
 | `Esc` | Exit measurement mode |
 | `Enter` | Toggle H/V snapping on or off (works in the panel and mid-drag) |
+| **Click** *(no drag)* | Detect the solid scale bar under the cursor (white-on-black or black-on-white), measure it to sub-pixel precision and open the scale dialog |
+| **Shift+click** | Detect the edges of the image under the cursor and set it as the **image frame** (see PNG export) |
+| **Shift+drag** | Draw the image frame by hand |
+| `Ctrl+C` | Copy the PNG to the clipboard (overlay or panel) |
 | **Right-click** | Cancel the line you're currently drawing; if you're not drawing, exit measurement mode |
 | **Measure** *(button)* | Same as pressing `Space` |
 | **Snap: On/Off** *(button)* | Same toggle as `Enter`; current state also shows in the overlay hint bar |
 | **Delete** *(button)* | Remove the selected measurement and renumber |
 | **Clear all** *(button)* | Remove everything and reset the scale |
 | **File ▸ Set scale…** | Re-calibrate from the selected (or last) measurement; recomputes every row |
+| **File ▸ Copy PNG** / **Copy PNG** *(button)* | Put the transparent PNG on the clipboard, ready to paste into PureRef |
 | **File ▸ Save PNG…** | Export the numbered lines as a transparent PNG (see below) |
+| **File ▸ Clear image frame** | Go back to bounding-box PNG output |
 | **File ▸ Save CSV…** | Export the table (index, pixels, scaled, units) |
 
 While measurement mode is active the panel drops to **50% opacity** so it stays
@@ -87,7 +93,28 @@ working on. Minimizing the window hides them; restoring brings them back.
 the numbered lines, tick marks, and labels. It's sized to the bounding box of
 your measurements in absolute screen pixels, so if you drop it on top of a
 screenshot of what you measured, the lines land exactly where you drew them.
-The loupe and the on-screen hint bar are never included.
+The loupe and the on-screen hint bar are never included. **Copy PNG** (`Ctrl+C`)
+puts the same image on the clipboard (as PNG + 32-bit DIB, so transparency
+survives a paste into PureRef).
+
+**Matching the image's resolution.** Set an *image frame* and the PNG is cropped
+to that image and resampled to its native pixel size, so it overlays the source
+exactly:
+
+1. In PureRef, select the image and press `Ctrl+C` (this puts the full-resolution
+   image on the clipboard — the Ruler only reads its width and height).
+2. Measure mode → **Shift+click** the image. Its edges are detected against
+   the flat canvas colour (or **Shift+drag** a rectangle). The frame tag shows
+   the output size; if no matching clipboard image was found it falls back to
+   the on-screen size.
+3. Measure, `Ctrl+C`, and paste into PureRef. The overlay has the same pixel
+   size as the source, so give it the same scale as the image (if the image is
+   at 100% it already matches) and align the corners.
+
+Rotations by 90° are handled; arbitrary rotations aren't.
+
+Labels are laid out to avoid each other, the badges and every line; a label
+pushed away from its line gets a thin leader back to it.
 
 ## How measuring works
 
@@ -121,7 +148,8 @@ crosshair on the exact pixel. Scale is stored as *units per pixel*
 | `Overlay.cs` | Transparent full-screen overlay + magnifier / drawing canvas |
 | `ScaleDialog.cs` | The scale + units prompt |
 | `Native.cs` | Win32 screen capture and cursor position |
-| `MeasureRender.cs` | Shared line drawing + transparent-PNG export |
+| `MeasureRender.cs` | Shared line drawing, label layout, transparent-PNG render |
+| `Detect.cs` | One-click scale-bar and image-frame detection on the snapshot |
 | `SelfTest.cs` | `Ruler.exe --selftest <dir>` renders the UI to PNGs (dev check) |
 | `app.manifest` | Per-monitor-v2 DPI awareness |
 | `icon.ico` | App icon — two intersecting ruler lines (16–256 px) |

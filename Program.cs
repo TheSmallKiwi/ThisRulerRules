@@ -9,6 +9,7 @@ using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 namespace Ruler;
@@ -122,6 +123,10 @@ public sealed class ControlPanel : Window
 {
     public ObservableCollection<Measurement> Items { get; } = new();
     public Calibration? Cal { get; private set; }
+    public ImageFrame? Frame { get; private set; }
+
+    private double? _lastScaleValue;
+    private uint _ownClipboardSeq; // clipboard state right after our own Copy PNG
 
     private OverlayWindow? _overlay;
     private bool _active;
@@ -149,7 +154,9 @@ public sealed class ControlPanel : Window
         DockPanel.SetDock(menu, Dock.Top);
         var fileMenu = new MenuItem { Header = "_File" };
         fileMenu.Items.Add(MakeMenuItem("Set scale…", SetScale));
+        fileMenu.Items.Add(MakeMenuItem("Clear image frame", ClearFrame));
         fileMenu.Items.Add(new Separator());
+        fileMenu.Items.Add(MakeMenuItem("Copy PNG", () => CopyPng(), "Ctrl+C"));
         fileMenu.Items.Add(MakeMenuItem("Save PNG…", SavePng));
         fileMenu.Items.Add(MakeMenuItem("Save CSV…", SaveCsv));
         fileMenu.Items.Add(new Separator());
@@ -161,7 +168,8 @@ public sealed class ControlPanel : Window
 
         var help = new TextBlock
         {
-            Text = "Press Space to start measuring. Drag to draw ruler lines. Esc exits measurement mode.",
+            Text = "Press Space to start measuring. Drag to draw ruler lines; click a scale bar to calibrate from it. "
+                 + "Shift+click an image to frame it for native-resolution PNGs. Esc exits measurement mode.",
             TextWrapping = TextWrapping.Wrap,
             Foreground = Brushes.DimGray,
             Margin = new Thickness(0, 0, 0, 10),
@@ -190,6 +198,7 @@ public sealed class ControlPanel : Window
         buttons.Children.Add(_snapButton);
         buttons.Children.Add(MakeButton("Delete", (_, _) => DeleteSelected()));
         buttons.Children.Add(MakeButton("Clear all", (_, _) => ClearAll()));
+        buttons.Children.Add(MakeButton("Copy PNG", (_, _) => CopyPng()));
         bottom.Children.Add(buttons);
         root.Children.Add(bottom);
 
@@ -228,6 +237,12 @@ public sealed class ControlPanel : Window
                 Activate_();
                 e.Handled = true;
             }
+            else if (e.Key == Key.C && Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                // Preempt the DataGrid's own row copy.
+                CopyPng();
+                e.Handled = true;
+            }
             else if (e.Key == Key.Enter)
             {
                 // Preempt the focused button / DataGrid so Enter always toggles snap.
@@ -248,9 +263,9 @@ public sealed class ControlPanel : Window
         Closed += (_, _) => _overlay?.Close();
     }
 
-    private static MenuItem MakeMenuItem(string header, Action onClick)
+    private static MenuItem MakeMenuItem(string header, Action onClick, string? gesture = null)
     {
-        var mi = new MenuItem { Header = header };
+        var mi = new MenuItem { Header = header, InputGestureText = gesture ?? "" };
         mi.Click += (_, _) => onClick();
         return mi;
     }
@@ -335,12 +350,13 @@ public sealed class ControlPanel : Window
     }
 
     /// <summary>
-    /// Called by the overlay when a drag finishes. Calibrates on the first
-    /// measurement, then records the numbered result.
+    /// Called by the overlay when a line is finished. Calibrates on the first
+    /// measurement (or always, for a clicked scale bar), then records the
+    /// numbered result.
     /// </summary>
-    public void HandleMeasurement(Point start, Point end, double pixels, Window dialogOwner)
+    public void HandleMeasurement(Point start, Point end, double pixels, Window dialogOwner, bool calibrate = false)
     {
-        if (Cal == null)
+        if (Cal == null || calibrate)
         {
             if (!ShowScaleDialog(pixels, dialogOwner))
                 return; // user cancelled calibration — discard this line
@@ -378,9 +394,10 @@ public sealed class ControlPanel : Window
 
     private bool ShowScaleDialog(double pixels, Window owner)
     {
-        var dlg = new ScaleDialog(pixels) { Owner = owner };
+        var dlg = new ScaleDialog(pixels, _lastScaleValue, Cal?.Units) { Owner = owner };
         if (dlg.ShowDialog() == true)
         {
+            _lastScaleValue = dlg.Value;
             Cal = new Calibration(dlg.Units, dlg.Value / pixels);
             RecomputeAll();
             UpdateStatus();
@@ -421,11 +438,12 @@ public sealed class ControlPanel : Window
     {
         if (Items.Count == 0)
             return;
-        if (MessageBox.Show(this, "Clear all measurements and the current scale?",
+        if (MessageBox.Show(this, "Clear all measurements, the current scale and the image frame?",
                 "Ruler", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK)
             return;
         Items.Clear();
         Cal = null;
+        Frame = null;
         UpdateStatus();
         if (_active)
             _overlay?.Redraw();
@@ -450,13 +468,85 @@ public sealed class ControlPanel : Window
             return;
         try
         {
-            MeasureRender.ExportPng(Items, dlg.FileName);
+            MeasureRender.ExportPng(Items, Frame, dlg.FileName);
         }
         catch (Exception ex)
         {
             MessageBox.Show(this, "Could not save PNG:\n" + ex.Message, "Ruler",
                 MessageBoxButton.OK, MessageBoxImage.Error);
         }
+    }
+
+    /// <summary>Render the PNG straight to the clipboard (for pasting into PureRef etc.).</summary>
+    public bool CopyPng()
+    {
+        var bmp = MeasureRender.Render(Items, Frame);
+        if (bmp == null)
+            return false;
+        IntPtr hwnd = new WindowInteropHelper(this).Handle;
+        if (!Native.SetClipboardImage(hwnd, bmp, MeasureRender.EncodePng(bmp)))
+        {
+            MessageBox.Show(this, "Could not open the clipboard — another app may be holding it.", "Ruler",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
+        _ownClipboardSeq = Native.ClipboardSequence();
+        _status.Text = $"Copied {bmp.PixelWidth} × {bmp.PixelHeight} PNG to the clipboard.";
+        return true;
+    }
+
+    /// <summary>
+    /// Set the image frame (absolute physical px). The native size comes from
+    /// an image on the clipboard (e.g. Ctrl+C in PureRef) if its aspect ratio
+    /// matches; otherwise the on-screen size is used. Returns a status line.
+    /// </summary>
+    public string SetFrame(Rect screen)
+    {
+        double fa = screen.Width / screen.Height;
+        int w = (int)Math.Round(screen.Width), h = (int)Math.Round(screen.Height);
+        bool fromClip = false;
+        if (ClipboardImageSize() is var (cw, ch))
+        {
+            if (Math.Abs(fa / ((double)cw / ch) - 1) < 0.03)
+                (w, h, fromClip) = (cw, ch, true);
+            else if (Math.Abs(fa / ((double)ch / cw) - 1) < 0.03)
+                (w, h, fromClip) = (ch, cw, true); // image rotated 90° on screen
+        }
+        Frame = new ImageFrame(screen, w, h, fromClip);
+        UpdateStatus();
+        _overlay?.Redraw();
+        return fromClip
+            ? $"Image frame set — PNG output will be {w} × {h} px (size from clipboard image)"
+            : $"Image frame set at screen size {w} × {h} px — copy the image first (Ctrl+C in PureRef) to use its native size";
+    }
+
+    private void ClearFrame()
+    {
+        Frame = null;
+        UpdateStatus();
+        _overlay?.Redraw();
+    }
+
+    /// <summary>Pixel size of the image on the clipboard, unless it's our own copy.</summary>
+    private (int W, int H)? ClipboardImageSize()
+    {
+        if (_ownClipboardSeq != 0 && Native.ClipboardSequence() == _ownClipboardSeq)
+            return null;
+        try
+        {
+            if (Clipboard.ContainsData("PNG") && Clipboard.GetData("PNG") is Stream s)
+            {
+                var frame = BitmapDecoder.Create(s, BitmapCreateOptions.DelayCreation, BitmapCacheOption.None).Frames[0];
+                return (frame.PixelWidth, frame.PixelHeight);
+            }
+            if (Clipboard.ContainsImage() && Clipboard.GetImage() is { } img)
+                return (img.PixelWidth, img.PixelHeight);
+        }
+        catch (Exception ex)
+        {
+            Diag.Log("clipboard read failed: " + ex.Message);
+        }
+        return null;
     }
 
     private void SaveCsv()
@@ -523,13 +613,15 @@ public sealed class ControlPanel : Window
     {
         if (Cal == null)
         {
-            _status.Text = "Scale: not set — the first measurement will calibrate it.";
+            _status.Text = "Scale: not set — click a scale bar, or the first measurement will calibrate it."
+                + (Frame is { } f0 ? $"\nImage frame: PNG output {f0.NativeW} × {f0.NativeH} px" : "");
             return;
         }
         double perPx = Cal.UnitsPerPixel;
         double pxPerUnit = perPx > 0 ? 1 / perPx : 0;
         _status.Text =
             $"Scale: 1 px = {perPx:0.####} {Cal.Units}   ({pxPerUnit:0.##} px = 1 {Cal.Units})"
-            + $"     •     {Items.Count} measurement(s)";
+            + $"     •     {Items.Count} measurement(s)"
+            + (Frame is { } f ? $"\nImage frame: PNG output {f.NativeW} × {f.NativeH} px" + (f.FromClipboard ? "" : " (screen size)") : "");
     }
 }

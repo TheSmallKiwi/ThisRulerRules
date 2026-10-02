@@ -194,6 +194,95 @@ internal static class Native
     }
 
     public static BitmapSource CaptureScreen(int w, int h) => CaptureRegion(0, 0, w, h);
+
+    // ---- clipboard -------------------------------------------------------
+
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll")] private static extern bool CloseClipboard();
+    [DllImport("user32.dll")] private static extern bool EmptyClipboard();
+    [DllImport("user32.dll")] private static extern IntPtr SetClipboardData(uint format, IntPtr hMem);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern uint RegisterClipboardFormat(string name);
+    [DllImport("user32.dll")] private static extern uint GetClipboardSequenceNumber();
+    [DllImport("kernel32.dll")] private static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
+    [DllImport("kernel32.dll")] private static extern IntPtr GlobalLock(IntPtr hMem);
+    [DllImport("kernel32.dll")] private static extern bool GlobalUnlock(IntPtr hMem);
+    [DllImport("kernel32.dll")] private static extern IntPtr GlobalFree(IntPtr hMem);
+
+    private const uint CF_DIBV5 = 17;
+    private const uint GMEM_MOVEABLE = 0x0002;
+
+    /// <summary>Changes every time anyone writes the clipboard.</summary>
+    public static uint ClipboardSequence() => GetClipboardSequenceNumber();
+
+    /// <summary>
+    /// Put an image on the clipboard with its alpha intact: as "PNG" (what Qt
+    /// apps such as PureRef prefer) and as CF_DIBV5 with straight alpha.
+    /// Windows synthesizes plain CF_DIB / CF_BITMAP for everything else.
+    /// </summary>
+    public static bool SetClipboardImage(IntPtr owner, BitmapSource bmp, byte[] png)
+    {
+        byte[] dib = DibV5(bmp);
+        for (int attempt = 0; attempt < 10; attempt++)
+        {
+            if (OpenClipboard(owner))
+            {
+                try
+                {
+                    EmptyClipboard();
+                    bool ok = Put(RegisterClipboardFormat("PNG"), png);
+                    ok &= Put(CF_DIBV5, dib);
+                    return ok;
+                }
+                finally { CloseClipboard(); }
+            }
+            Thread.Sleep(20); // another app has it open
+        }
+        return false;
+    }
+
+    private static bool Put(uint format, byte[] data)
+    {
+        IntPtr h = GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)data.Length);
+        if (h == IntPtr.Zero)
+            return false;
+        IntPtr ptr = GlobalLock(h);
+        Marshal.Copy(data, 0, ptr, data.Length);
+        GlobalUnlock(h);
+        if (SetClipboardData(format, h) != IntPtr.Zero)
+            return true; // the clipboard owns it now
+        GlobalFree(h);
+        return false;
+    }
+
+    /// <summary>BITMAPV5HEADER + bottom-up straight-alpha BGRA rows.</summary>
+    private static byte[] DibV5(BitmapSource bmp)
+    {
+        var src = new FormatConvertedBitmap(bmp, PixelFormats.Bgra32, null, 0);
+        int w = src.PixelWidth, h = src.PixelHeight, stride = w * 4;
+        var pixels = new byte[stride * h];
+        src.CopyPixels(pixels, stride, 0);
+
+        const int Hdr = 124;
+        var dib = new byte[Hdr + pixels.Length];
+        void I32(int at, int v) => BitConverter.GetBytes(v).CopyTo(dib, at);
+        void U32(int at, uint v) => BitConverter.GetBytes(v).CopyTo(dib, at);
+        I32(0, Hdr);
+        I32(4, w);
+        I32(8, h);                 // positive = bottom-up, the most widely understood layout
+        BitConverter.GetBytes((short)1).CopyTo(dib, 12);
+        BitConverter.GetBytes((short)32).CopyTo(dib, 14);
+        I32(16, 3);                // BI_BITFIELDS
+        I32(20, pixels.Length);
+        U32(40, 0x00FF0000);       // red mask
+        U32(44, 0x0000FF00);       // green
+        U32(48, 0x000000FF);       // blue
+        U32(52, 0xFF000000);       // alpha
+        U32(56, 0x73524742);       // LCS_sRGB
+        I32(108, 4);               // LCS_GM_IMAGES
+        for (int y = 0; y < h; y++)
+            Buffer.BlockCopy(pixels, y * stride, dib, Hdr + (h - 1 - y) * stride, stride);
+        return dib;
+    }
 }
 
 /// <summary>Tiny append-only log to help diagnose input issues in the field.</summary>

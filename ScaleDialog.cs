@@ -17,7 +17,7 @@ public sealed class ScaleDialog : Window
     public double Value { get; private set; }
     public string Units { get; private set; } = "";
 
-    public ScaleDialog(double pixels)
+    public ScaleDialog(double pixels, double? lastValue = null, string? lastUnits = null)
     {
         Title = "Set scale";
         SizeToContent = SizeToContent.WidthAndHeight;
@@ -46,7 +46,9 @@ public sealed class ScaleDialog : Window
 
         var row = new StackPanel { Orientation = Orientation.Horizontal };
         _unit.ItemsSource = new[] { "px", "mm", "cm", "m", "in", "ft", "µm", "°" };
-        _unit.Text = "cm";
+        _unit.Text = lastUnits ?? "cm";
+        if (lastValue is { } v)
+            _value.Text = v.ToString(CultureInfo.CurrentCulture);
         row.Children.Add(_value);
         row.Children.Add(new TextBlock { Width = 8 });
         row.Children.Add(_unit);
@@ -69,7 +71,7 @@ public sealed class ScaleDialog : Window
         root.Children.Add(buttons);
 
         Content = root;
-        Loaded += (_, _) => { _value.Focus(); };
+        Loaded += (_, _) => { _value.Focus(); _value.SelectAll(); };
     }
 
     private void OnOk(object sender, RoutedEventArgs e)

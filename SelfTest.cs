@@ -37,7 +37,7 @@ internal static class SelfTest
                 {
                     RenderPanel(panel, Path.Combine(outDir, "panel.png"));
                     RenderOverlay(panel, outDir);
-                    MeasureRender.ExportPng(panel.Items, Path.Combine(outDir, "lines.png"));
+                    MeasureRender.ExportPng(panel.Items, null, Path.Combine(outDir, "lines.png"));
                     VerifyInput(panel, outDir, app); // async; shuts the app down when done
                 }
                 catch (Exception ex)

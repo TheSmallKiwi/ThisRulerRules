@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Windows;
@@ -23,8 +24,11 @@ public sealed class OverlayWindow : Window
     private bool _dragging;
     private bool _dialogOpen;
     private bool _measuring;   // true = interactive; false = passive line display
+    private bool _frameDrag;   // Shift held at mouse-down: drawing the image frame
     private Point _startDip;
     private Native.MonitorSpec _spec;
+    private Pixels? _pixels;   // lazily decoded snapshot for click detection
+    private readonly DispatcherTimer _toastTimer = new() { Interval = TimeSpan.FromSeconds(3) };
 
     private const double SnapTan = 0.12; // ~7° tolerance for mild H/V snapping
 
@@ -58,6 +62,17 @@ public sealed class OverlayWindow : Window
         MouseMove += OnMouseMove;
         MouseLeftButtonUp += OnMouseUp;
         MouseRightButtonDown += OnRightDown;
+
+        _toastTimer.Tick += (_, _) => { _toastTimer.Stop(); _canvas.Toast = ""; _canvas.InvalidateVisual(); };
+    }
+
+    /// <summary>Brief message under the hint bar.</summary>
+    private void ShowToast(string text)
+    {
+        _canvas.Toast = text;
+        _toastTimer.Stop();
+        _toastTimer.Start();
+        _canvas.InvalidateVisual();
     }
 
     /// <summary>Enter measurement mode covering the given monitor.</summary>
@@ -65,6 +80,7 @@ public sealed class OverlayWindow : Window
     {
         _spec = spec;
         _measuring = true;
+        _pixels = null;
         _canvas.Configure(shot, spec.Scale, spec.Left, spec.Top, lines, _panel);
         _canvas.ShowLoupe = true;
         _canvas.ShowChrome = true;
@@ -151,7 +167,15 @@ public sealed class OverlayWindow : Window
                 e.Handled = true;
                 break;
 
+            case Key.C when Keyboard.Modifiers == ModifierKeys.Control:
+                if (_panel.CopyPng())
+                    ShowToast("Copied PNG to the clipboard");
+                e.Handled = true;
+                break;
+
             case Key.Enter:
+                if (_frameDrag)
+                    break; // no snapping for the frame rectangle
                 _panel.ToggleSnap();
                 if (_dragging)
                     ApplyDragPoint(_canvas.CursorPt); // re-evaluate the line in flight
@@ -168,6 +192,7 @@ public sealed class OverlayWindow : Window
         {
             var shot = Native.CaptureRegion(_spec.Left, _spec.Top, _spec.Width, _spec.Height);
             _canvas.UpdateShot(shot);
+            _pixels = null;
             _canvas.Visibility = Visibility.Visible;
             _canvas.InvalidateVisual();
         }));
@@ -196,6 +221,8 @@ public sealed class OverlayWindow : Window
     {
         _startDip = e.GetPosition(_canvas);
         _dragging = true;
+        _frameDrag = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
+        _canvas.FrameDrag = _frameDrag;
         _canvas.Dragging = true;
         _canvas.StartDip = _startDip;
         _canvas.CurDip = _startDip;
@@ -217,7 +244,7 @@ public sealed class OverlayWindow : Window
     /// <summary>Set the dragged endpoint, applying snapping only if it's enabled.</summary>
     private void ApplyDragPoint(Point p)
     {
-        if (_panel.SnapEnabled)
+        if (_panel.SnapEnabled && !_frameDrag)
         {
             _canvas.CurDip = SnapPoint(_startDip, p, out string snap);
             _canvas.Snap = snap;
@@ -239,23 +266,82 @@ public sealed class OverlayWindow : Window
         ReleaseMouseCapture();
 
         Point end = _canvas.CurDip;
-        double lenDip = (end - _startDip).Length;
-        if (lenDip < 3)
+        bool click = (end - _startDip).Length < 3;
+
+        if (_frameDrag)
+        {
+            _frameDrag = _canvas.FrameDrag = false;
+            if (click)
+                DetectFrame(_startDip);
+            else
+                SetFrame(new Rect(Phys(_startDip), Phys(end)));
+            return;
+        }
+
+        if (click)
+        {
+            DetectScaleBar(_startDip);
+            return;
+        }
+
+        Commit(Phys(_startDip), Phys(end), (end - _startDip).Length * _spec.Scale, calibrate: false);
+    }
+
+    /// <summary>Window-local DIP -> absolute physical pixel.</summary>
+    private Point Phys(Point dip) => new(_spec.Left + dip.X * _spec.Scale, _spec.Top + dip.Y * _spec.Scale);
+
+    private Pixels? SnapshotPixels()
+    {
+        if (_pixels == null && _canvas.Shot != null)
+            _pixels = new Pixels(_canvas.Shot);
+        return _pixels;
+    }
+
+    /// <summary>Plain click: measure the scale bar under the cursor and calibrate from it.</summary>
+    private void DetectScaleBar(Point dip)
+    {
+        var px = SnapshotPixels();
+        int x = (int)Math.Floor(dip.X * _spec.Scale), y = (int)Math.Floor(dip.Y * _spec.Scale);
+        if (px == null || !Detect.ScaleBar(px, x, y, out Point a, out Point b))
+        {
+            ShowToast("No scale bar found there - click right on a solid bar, or drag to measure");
+            return;
+        }
+        var origin = new Vector(_spec.Left, _spec.Top);
+        Commit(a + origin, b + origin, (b - a).Length, calibrate: true);
+    }
+
+    /// <summary>Shift+click: find the edges of the image under the cursor.</summary>
+    private void DetectFrame(Point dip)
+    {
+        var px = SnapshotPixels();
+        int x = (int)Math.Floor(dip.X * _spec.Scale), y = (int)Math.Floor(dip.Y * _spec.Scale);
+        if (px == null || !Detect.ImageFrame(px, x, y, out Int32Rect r))
+        {
+            ShowToast("Couldn't find the image edges - Shift+drag to draw the frame instead");
+            return;
+        }
+        SetFrame(new Rect(_spec.Left + r.X, _spec.Top + r.Y, r.Width, r.Height));
+    }
+
+    private void SetFrame(Rect phys)
+    {
+        if (phys.Width < 8 || phys.Height < 8)
         {
             _canvas.InvalidateVisual();
             return;
         }
+        ShowToast(_panel.SetFrame(phys));
+    }
 
-        // Convert to absolute physical coordinates for storage / measurement.
-        Point sPhys = new(_spec.Left + _startDip.X * _spec.Scale, _spec.Top + _startDip.Y * _spec.Scale);
-        Point ePhys = new(_spec.Left + end.X * _spec.Scale, _spec.Top + end.Y * _spec.Scale);
-        double px = lenDip * _spec.Scale;
-
+    /// <summary>Hand a finished line to the panel (which may show the scale dialog), then refocus.</summary>
+    private void Commit(Point sPhys, Point ePhys, double px, bool calibrate)
+    {
         _dialogOpen = true;
         _canvas.ShowLoupe = false;
         _canvas.InvalidateVisual();
 
-        _panel.HandleMeasurement(sPhys, ePhys, px, this);
+        _panel.HandleMeasurement(sPhys, ePhys, px, this, calibrate);
 
         _dialogOpen = false;
         if (IsVisible)
@@ -298,22 +384,30 @@ public sealed class OverlayCanvas : FrameworkElement
     private double _ppd = 1.0;
 
     public bool Dragging;
+    public bool FrameDrag;
     public bool ShowLoupe;
     public bool ShowChrome = true; // hint bar; off in passive display mode
     public Point StartDip;
     public Point CurDip;
     public Point CursorPt; // window-local DIP
     public string Snap = "";
+    public string Toast = "";
+
+    public BitmapSource? Shot => _shot;
 
     private const double LoupeHalfExtent = 14;
     private const double LoupeDiameter = 190;
 
     private static readonly Brush HintBg = new SolidColorBrush(Color.FromArgb(0xB0, 0x14, 0x14, 0x16));
+    private static readonly Brush FrameBrush = new SolidColorBrush(Color.FromRgb(0x2C, 0xC8, 0xFF));
+    private static readonly Brush FrameTagBg = new SolidColorBrush(Color.FromArgb(0xC0, 0x0B, 0x50, 0x6A));
 
     public OverlayCanvas()
     {
         RenderOptions.SetBitmapScalingMode(this, BitmapScalingMode.NearestNeighbor);
         HintBg.Freeze();
+        FrameBrush.Freeze();
+        FrameTagBg.Freeze();
     }
 
     public void Configure(BitmapSource shot, double scale, double originX, double originY,
@@ -348,18 +442,30 @@ public sealed class OverlayCanvas : FrameworkElement
         dc.DrawRectangle(Brushes.Transparent, null, new Rect(0, 0, ActualWidth, ActualHeight));
 
         if (ShowChrome)
+        {
             DrawHint(dc);
+            if (_panel?.Frame is { } frame)
+                DrawFrame(dc, new Rect(LocalOf(frame.Screen.TopLeft), LocalOf(frame.Screen.BottomRight)),
+                    $"Image  {frame.NativeW} × {frame.NativeH} px" + (frame.FromClipboard ? "" : "  (screen size)"));
+        }
 
+        var bounds = new Rect(0, 0, ActualWidth, ActualHeight);
+        var specs = new List<LineSpec>();
         if (_lines != null)
             foreach (var m in _lines)
-                MeasureRender.DrawMeasurement(dc, LocalOf(m.Start), LocalOf(m.End), m.Index,
-                    m.OverlayLabel, false, _ppd, _face, ActualWidth, ActualHeight);
+            {
+                Point a = LocalOf(m.Start), b = LocalOf(m.End);
+                if (bounds.IntersectsWith(new Rect(a, b))) // skip lines on other monitors
+                    specs.Add(new LineSpec(a, b, m.Index, m.OverlayLabel, false));
+            }
+        if (Dragging && !FrameDrag)
+            specs.Add(new LineSpec(StartDip, CurDip, (_lines?.Count ?? 0) + 1, LiveLabel(), true));
+        MeasureRender.DrawAll(dc, specs, _ppd, _face, bounds);
 
-        if (Dragging)
+        if (Dragging && FrameDrag)
         {
-            int n = (_lines?.Count ?? 0) + 1;
-            MeasureRender.DrawMeasurement(dc, StartDip, CurDip, n, LiveLabel(), true,
-                _ppd, _face, ActualWidth, ActualHeight);
+            var r = new Rect(StartDip, CurDip);
+            DrawFrame(dc, r, $"{r.Width * _scale:0} × {r.Height * _scale:0} px");
         }
 
         if (ShowLoupe && _shot != null)
@@ -369,7 +475,7 @@ public sealed class OverlayCanvas : FrameworkElement
     private void DrawHint(DrawingContext dc)
     {
         string snap = _panel?.SnapEnabled == false ? "Snap OFF" : "Snap ON";
-        var ft = Fmt($"Measure mode   •   drag to measure   •   Enter: {snap}   •   Space/R refresh   •   Esc exit",
+        var ft = Fmt($"Drag: measure   •   Click bar: set scale   •   Shift+click/drag: image frame   •   Ctrl+C: copy PNG   •   Enter: {snap}   •   Esc exit",
             12.5, Brushes.White);
         double pad = 10;
         double w = ft.Width + pad * 2;
@@ -378,6 +484,25 @@ public sealed class OverlayCanvas : FrameworkElement
         double y = 12;
         dc.DrawRoundedRectangle(HintBg, null, new Rect(x, y, w, h), 8, 8);
         dc.DrawText(ft, new Point(x + pad, y + h / 2 - ft.Height / 2));
+
+        if (Toast.Length > 0)
+        {
+            var tt = Fmt(Toast, 12.5, Brushes.White);
+            double tw = tt.Width + pad * 2;
+            var tr = new Rect((ActualWidth - tw) / 2, y + h + 6, tw, tt.Height + pad);
+            dc.DrawRoundedRectangle(HintBg, null, tr, 8, 8);
+            dc.DrawText(tt, new Point(tr.X + pad, tr.Y + pad / 2));
+        }
+    }
+
+    private void DrawFrame(DrawingContext dc, Rect r, string tag)
+    {
+        var pen = new Pen(FrameBrush, 1.5) { DashStyle = new DashStyle(new double[] { 4, 3 }, 0) };
+        dc.DrawRectangle(null, pen, r);
+        var ft = Fmt(tag, 11, Brushes.White);
+        var tr = new Rect(r.X + 1, r.Y + 1, ft.Width + 10, ft.Height + 4);
+        dc.DrawRectangle(FrameTagBg, null, tr);
+        dc.DrawText(ft, new Point(tr.X + 5, tr.Y + 2));
     }
 
     private void DrawLoupe(DrawingContext dc)
